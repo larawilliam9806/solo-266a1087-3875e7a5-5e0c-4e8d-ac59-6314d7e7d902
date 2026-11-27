@@ -1,0 +1,44 @@
+services:
+  primary:
+    build: .
+    image: paramstore:latest
+    environment:
+      APP_ROLE: primary
+      DB_PATH: /data/primary.db
+    ports:
+      - "8000:8000"
+    volumes:
+      - primary_data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health').status==200 else 1)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  replica:
+    image: paramstore:latest
+    depends_on:
+      primary:
+        condition: service_healthy
+    environment:
+      APP_ROLE: replica
+      DB_PATH: /data/replica.db
+      PRIMARY_URL: http://primary:8000
+      # 副本每轮最多追几笔提交（按提交顺序回放每笔原始改动）
+      REPLICA_MAX_CATCHUP: "2"
+      REPLICA_POLL_INTERVAL: "0.2"
+      # 想看明显的副本滞后 / 等待效果可调大，例如 "0.5"
+      REPLICA_LAG: "0"
+    ports:
+      - "8001:8000"
+    volumes:
+      replica_data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health').status==200 else 1)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  primary_data:
+  replica_data:
