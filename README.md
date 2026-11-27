@@ -7,6 +7,7 @@
 - 副本按**提交顺序回放每笔原始改动**，可限制每轮最多追几笔；
 - 参数与回放进度**同一个事务**落库，崩溃不会出现「参数已改、进度没动」；
 - 按设备编号批量查询，可带**最低提交号**与**最长等候时间**，返回参数、数据来源和同次读取所见的提交号；
+- 副本关停有 **5 秒预算**：主库迟迟不回时取消在途拉取、结束回放并关闭相关 HTTP 连接，未开写的提交不再落库，在写的一笔整笔提交或回滚；
 - 一条 `docker compose up` 启动主库 + 副本两个容器。
 
 ## 查询路由语义
@@ -32,7 +33,7 @@ app/
   routers/primary.py   # 主库：写入 / 内部回放接口 / 兜底快照
   routers/replica.py   # 副本：等待 + 路由查询
   main.py              # 应用工厂，按 APP_ROLE 装配
-tests/                 # 13 个 pytest 用例（进程内 ASGI 直连，无需起服务）
+tests/                 # pytest 用例（进程内 ASGI 直连，无需起服务）
 docker-compose.yml     # primary:8000 + replica:8001，各自独立卷
 ```
 
@@ -114,6 +115,22 @@ curl "http://localhost:8001/devices/params?device_id=DEV-1&device_id=DEV-2&min_c
 - `GET /health`：容器健康检查；
 - 交互式文档：`/docs`（OpenAPI）。
 
+## 副本关停与重启
+
+`docker compose stop`（或向副本进程发 SIGTERM）触发的关停在 **5 秒预算**
+（`ReplayWorker.stop(timeout=5.0)`）内完成，主库迟迟不回也不会拖住关停：
+
+1. 置位关停信号并取消回放线程**当前在途的拉取任务**——挂起的 HTTP 请求随
+   任务取消而中止，连接在回放线程的私有事件循环上被真正关闭，不再干等
+   httpx 的 10 秒读超时；
+2. 关停开始后**尚未开始写入**的提交一律不再落库；
+3. **正在写入的一笔**由单条 SQLite 事务保证完整提交或整笔回滚，
+   `param_current` 与 `replay_progress` 要么一起前进、要么都不变；
+4. 回放线程与其私有事件循环线程在预算内 join 回收；服务主循环上因
+   **主库兜底查询**而持有的 HTTP 连接，由应用 lifespan 统一关闭；
+5. 副本用**原库重启**后，回放线程先读 `replay_progress.last_seq`，从最后一笔
+   已落库提交的**下一笔**继续拉取回放；已落库提交幂等跳过，每笔只落库一次。
+
 ## 数据模型
 
 | 表 | 作用 |
@@ -129,6 +146,6 @@ curl "http://localhost:8001/devices/params?device_id=DEV-1&device_id=DEV-2&min_c
 
 ```bash
 pip install -r requirements-dev.txt
-pytest -q                      # 13 个用例
+pytest -q                      # 全部用例（含副本关停 / 重启语义）
 python scripts/demo.py         # 本机起两个 uvicorn 跑完整场景
 ```

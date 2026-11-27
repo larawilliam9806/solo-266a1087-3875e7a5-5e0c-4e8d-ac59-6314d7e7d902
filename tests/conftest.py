@@ -54,4 +54,7 @@ async def env():
     finally:
         await primary_http.aclose()
         await replica_http.aclose()
+        # 与真实 lifespan 的关停顺序保持一致：先停回放（含私有循环上的连接），
+        # 再关闭服务循环上可能存在的兜底查询连接
+        replica_app.state.worker.stop()
         await replica_app.state.primary_client.aclose()

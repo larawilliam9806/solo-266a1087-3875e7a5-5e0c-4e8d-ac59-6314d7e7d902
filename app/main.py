@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -25,12 +26,13 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        # 先停回放线程：取消在途拉取、在私有循环上关闭其 HTTP 连接，
+        # 整体在 5 秒关停预算内完成
         if worker is not None:
             worker.stop()
+        # 再回收其余连接（例如兜底查询在服务主循环上持有的客户端）
         client = getattr(app.state, "primary_client", None)
         if client is not None:
-            import asyncio
-
             await asyncio.shield(client.aclose())
 
 
